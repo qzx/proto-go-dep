@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package dep;
+
+option go_package = "github.com/qzx/proto-go-dep/dep";
+
+import "google/protobuf/descriptor.proto";
+
+extend google.protobuf.MessageOptions {
+  string all = 90002;
+}
