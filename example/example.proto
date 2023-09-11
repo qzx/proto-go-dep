@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package example;
+
+option go_package = "github.com/qzx/protoc-gen-go-dep/example";
+
+message Hello {
+
+}
