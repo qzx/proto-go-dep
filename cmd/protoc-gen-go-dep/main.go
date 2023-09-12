@@ -57,6 +57,7 @@ func (p *Generator) Generate() (*pluginpb.CodeGeneratorResponse, error) {
         g.P("import (")
         g.P(`   "database/sql"`)
         g.P(`   _ "github.com/lib/pq"`)
+        g.P(`   "net/http"`)
         g.P(")")
         g.P("")
 

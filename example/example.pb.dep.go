@@ -3,6 +3,7 @@ package example
 import (
 	"database/sql"
 	_ "github.com/lib/pq"
+	"net/http"
 )
 
 // Lets start by creating a Model and Handler for our flow
