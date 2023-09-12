@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package dep;
+
+option go_package = "github.com/qzx/proto-go-dep/options;dep";
+
+import "google/protobuf/descriptor.proto";
+
+extend google.protobuf.MessageOptions {
+  DepsMessageOption opts = 90002;
+}
+
+message DepsMessageOption {
+    bool parent = 1;
+}
