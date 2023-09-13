@@ -4,6 +4,7 @@ import (
 	"google.golang.org/protobuf/compiler/protogen"
     "google.golang.org/protobuf/proto"
     "google.golang.org/protobuf/types/pluginpb"
+    "google.golang.org/protobuf/types/descriptorpb"
 
     "fmt"
     "os"
@@ -18,6 +19,8 @@ type Generator struct {
     messages map[string]struct{}
     suppressWarn bool
 }
+
+
 
 func NewGenerator(opts protogen.Options, request *pluginpb.CodeGeneratorRequest) (*Generator, error) {
     plugin, err := opts.New(request)
@@ -48,6 +51,10 @@ func (p *Generator) Generate() (*pluginpb.CodeGeneratorResponse, error) {
 	genFileMap := make(map[string]*protogen.GeneratedFile)
     
     for _, protoFile := range p.plugin.Files {
+        if fileHasOurOptions(protoFile) != true {
+            continue
+        }
+
         fileName := protoFile.GeneratedFilenamePrefix + ".pb.dep.go"
 		g := p.plugin.NewGeneratedFile(fileName, ".")
 		genFileMap[fileName] = g
@@ -58,17 +65,21 @@ func (p *Generator) Generate() (*pluginpb.CodeGeneratorResponse, error) {
         g.P(`   "database/sql"`)
         g.P(`   _ "github.com/lib/pq"`)
         g.P(`   "net/http"`)
+        g.P(`   "github.com/go-chi/chi/v5"`)
         g.P(")")
         g.P("")
 
         for _, message := range protoFile.Messages {
-            p.generateModel(g, message)
+            if messageHasOurOptions(message) == false {
+                continue
+            }
             p.generateListFunction(g, message)
+            p.generateGetFunction(g, message)
             p.generateCreateFunction(g, message)
             p.generateUpdateFunction(g, message)
             p.generateDeleteFunction(g, message)
             p.generateFormHandler(g, message)
-            p.generateDepsFunction(g, message)
+            p.generateTableFunction(g, message)
         }
 
     }
@@ -76,12 +87,34 @@ func (p *Generator) Generate() (*pluginpb.CodeGeneratorResponse, error) {
     return p.plugin.Response(), nil
 }
 
+func fileHasOurOptions(file *protogen.File) bool {
+    for _, message := range file.Messages {
+        if messageHasOurOptions(message) == true {
+            return true
+        }
+    }
+    return false
+}
+
+func messageHasOurOptions(message *protogen.Message) bool {
+    opts := message.Desc.Options().(*descriptorpb.MessageOptions)
+    if proto.HasExtension(opts, dep.E_Opts) {
+        val := proto.GetExtension(opts, dep.E_Opts).(string)
+		if val == "htmx" {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *Generator) generateModel(g *protogen.GeneratedFile, message *protogen.Message) {
     typeName := string(message.Desc.Name())
 
     g.P("// Lets start by creating a Model and Handler for our flow")
     g.P("type Handler struct {")
-    g.P("   m *model")
+    g.P("   DB *sql.DB")
+    g.P("   Parent string")
+    g.P("   ID string")
     g.P("}")
     g.P("")
     g.P("type model struct {")
@@ -100,11 +133,28 @@ func (p *Generator) generateModel(g *protogen.GeneratedFile, message *protogen.M
 func (p *Generator) generateListFunction(g *protogen.GeneratedFile, message *protogen.Message) {
     typeName := string(message.Desc.Name())
 
+    g.P("// ListHandler is our http handler that acquires and renders a list of objects")
+    g.P(`func (x *`, typeName, `) ListHandler(w http.ResponseWriter, req *http.Request) {`)
+    g.P(`   db, err := r.Context().Value("db").(*sql.DB)`)
+    g.P(`   if err != nil { return }`)
+    g.P("")
+    g.P(`   tenant := chi.URLParam(req, "id")`)
+    g.P(`   ret, err := x.List(db, tenant)`)
+    g.P(`   if err != nil { return }`)
+    g.P("")
+    g.P(`   jsonData, err := json.Marshal(data)`)
+    g.P(`   if err != nil { return }`)
+    g.P("")
+    g.P(`   w.Header().Set("Content-Type", "application/json")`)
+    g.P(`   w.Write(jsonData)`)
+    g.P("}")
+    g.P("")
+    g.P("")
     g.P("// List function should return a list of these objects")
-    g.P("func (m *model) List(tenant string) (map[int]", typeName, ", error) {")
+    g.P(`func (x *`, typeName, `) List(db *sql.DB, tenant string) (map[int]`, typeName, `, error) {`)
     g.P("   ret := make(map[int]", typeName, ")")
     g.P("")
-    g.P(`   rows, err := m.DB.Query("SELECT id, data FROM list_data($1, $2)", tenant, m.Table)`)
+    g.P(`   rows, err := db.Query("SELECT id, data FROM list_data($1, $2)", tenant, x.TableName())`)
     g.P("   if err != nil { return ret, err }")
     g.P("")
     g.P("   defer rows.Close()")
@@ -128,15 +178,11 @@ func (p *Generator) generateGetFunction(g *protogen.GeneratedFile, message *prot
     typeName := string(message.Desc.Name())
 
     g.P("// Get function acquires a single record based on ID in database")
-    g.P(`func (m *model) Get(tenant string, id int) (*`, typeName, `, error) {`)
-    g.P("   ret := new(", typeName, ")")
+    g.P(`func (x *`, typeName, `) Get(db *sql.DB, tenant string, id string) error {`)
     g.P("")
-    g.P(`   err := m.DB.QueryRow("SELECT data FROM list_data($1, $2) WHERE id = $3",`)
-    g.P("       tenant, m.Table, id).Scan(&contact)")
+    g.P(`   return db.QueryRow("SELECT data FROM list_data($1, $2) WHERE id = $3",`)
+    g.P("       tenant, x.TableName(), id).Scan(x)")
     g.P("")
-    g.P("   if err != nil { return nil, err }")
-    g.P("")
-    g.P("   return ret, nil")
     g.P("}")
     g.P("")
 }
@@ -153,9 +199,9 @@ func (p *Generator) generateCreateFunction(g *protogen.GeneratedFile, message *p
     checkField := strings.Join([]string{typeName, firstField}, ".")
     
     g.P("// Create function will create a new object of this type")
-    g.P(`func (m *model) Create(tenant string, data *`, typeName, `) error {`)
+    g.P(`func (x *`, typeName, `) Create(db *sql.DB, tenant string, data *`, typeName, `) error {`)
     g.P("   if ", checkField, ` != "" {`)
-    g.P(`       _, err := m.DB.Exec("CALL insert_data($1, $2, $3)", tenant, m.Table, contact)`)
+    g.P(`       _, err := db.Exec("CALL insert_data($1, $2, $3)", tenant, x.TableName(), contact)`)
     g.P("")
     g.P("       if err != nil { return err }")
     g.P("   } else {")
@@ -172,9 +218,9 @@ func (p *Generator) generateUpdateFunction(g *protogen.GeneratedFile, message *p
     typeName := string(message.Desc.Name())
 
     g.P("// Update function will replace the object stored at the given ID")
-    g.P(`func (m *model) Update(tenant string, id string, data *`, typeName, `) error {`)
-    g.P(`   _, err := m.DB.Exec("CALL update_data($1, $2, $3, $4)",`)
-    g.P("       tenant, m.Table, id, data)")
+    g.P(`func (x *`, typeName, `) Update(db *sql.DB, tenant string, id string, data *`, typeName, `) error {`)
+    g.P(`   _, err := db.Exec("CALL update_data($1, $2, $3, $4)",`)
+    g.P("       tenant, x.TableName(), id, data)")
     g.P("")
     g.P("   return err")
     g.P("}")
@@ -182,10 +228,12 @@ func (p *Generator) generateUpdateFunction(g *protogen.GeneratedFile, message *p
 }
 
 func (p *Generator) generateDeleteFunction(g *protogen.GeneratedFile, message *protogen.Message) {
+    typeName := string(message.Desc.Name())
+
     g.P("// Delete function will... well delete the object at given ID")
-    g.P(`func (m *model) Delete(tenant string, id string) error {`)
-    g.P(`   _, err := m.DB.Exec("CALL delete_data_by_id($1, $2, $3)",`)
-    g.P("       tenant, m.Table, id)")
+    g.P(`func (x *`, typeName, `) Delete(db *sql.DB, tenant string, id string) error {`)
+    g.P(`   _, err := db.Exec("CALL delete_data_by_id($1, $2, $3)",`)
+    g.P("       tenant, x.TableName(), id)")
     g.P("")
     g.P("   return err")
     g.P("}")
@@ -207,13 +255,52 @@ func (p *Generator) generateFormHandler(g *protogen.GeneratedFile, message *prot
     g.P("}")
 }
 
-func (p *Generator) generateDepsFunction(g *protogen.GeneratedFile, message *protogen.Message) {
+func (p *Generator) generateTableFunction(g *protogen.GeneratedFile, message *protogen.Message) {
 	typeName := string(message.Desc.Name())
 
     g.P(`// Deps function returns a static string for the time being, needs dev`)
-	g.P(`func (t *`, typeName, `) Deps() string {`)
-    g.P(`return "`, typeName, `"`)
+	g.P(`func (*`, typeName, `) TableName() string {`)
+    g.P(`   return "`, strings.ToLower(typeName), `"`)
 	g.P(`}`)
+    g.P("")
+}
+
+func (p *Generator) generateRouteFunction(g *protogen.GeneratedFile, message *protogen.Message) {
+	typeName := string(message.Desc.Name())
+
+    g.P(`// Route function will return chi.Router that can be mounted to a parent router`)
+    g.P(`func (x *`, typeName, `) Routes() chi.Router {`)
+    g.P("   r := chi.NewRouter()")
+    g.P("")
+    g.P(`   r.Get("/", x.ListHandler)`)
+    g.P(`   r.Post("/", x.CreateHandler)`)
+    g.P(`   r.Route("/{contact}", func(r chi.Router) {`)
+    g.P(`       r.Get("/", x.GetHandler)`)
+    g.P(`       r.Put("/", x.UpdateHandler)`)
+    g.P(`       r.Delete("/", x.DeleteHandler)`)
+    g.P("   })")
+    g.P("")
+    g.P("   return r")
+    g.P("}")
+}
+
+func (p *Generator) generateViewTemplate(g *protogen.GeneratedFile, message *protogen.Message) {
+	typeName := string(message.Desc.Name())
+
+    g.P(`// RenderView will take in a http writer and object to render the view`)
+    g.P(`func (x *`, typeName, `) RenderView(w http.ResponseWriter) {`)
+    g.P("   tmpl, err := template.New(\"view\").Parse(` ")
+    if len(message.Fields) > 0 {
+        for _, field := range message.Fields {
+         g.P(`<p class="w-16">`)
+         g.P("  <span>", field.GoName, "</span>")
+         g.P("  <span> {{ .", field.GoName, " }} </span>")
+         g.P("</p>")
+        }
+    }
+    g.P(    "`)")
+    g.P("")
+    g.P("   err := tmpl.Execute(w, x)")
     g.P("")
 }
 
@@ -264,3 +351,5 @@ func parseParameter(param string) map[string]string {
 
 	return paramMap
 }
+
+
